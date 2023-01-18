@@ -12,6 +12,7 @@
     "cli-progress": "^3.11.2",
     "open": "^8.4.0",
     "p-limit": "^4.0.0",
-    "spotify-web-api-node": "^5.0.2"
+    "spotify-web-api-node": "^5.0.2",
+    "table": "^6.8.1"
   }
 }

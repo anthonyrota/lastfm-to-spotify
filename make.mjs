@@ -2,6 +2,7 @@ import cliProgress, { Bar } from "cli-progress";
 import pLimit from "p-limit";
 import fs from "fs";
 import SpotifyWebApi from "spotify-web-api-node";
+import { table } from "table";
 
 const secrets = JSON.parse(fs.readFileSync("secrets.json", "utf8"));
 
@@ -40,7 +41,7 @@ const tracksLFM = await (async () => {
 
 let scrobbled = {};
 
-console.log("counting last fm scrobbles...");
+console.log("counting last.fm scrobbles...");
 tracksLFM.forEach((track) => {
   const artist = track.artist["#text"];
   const album = track.album["#text"];
@@ -68,6 +69,25 @@ let tracks = ordered.filter(
     ) &&
     album !== "Lost Cause" &&
     !(artist == "Bryson Tiller" && name === "Break Bread (feat. Vory)")
+);
+function bold(text) {
+  return `\\033[1m${text}\\033[21m`;
+}
+fs.writeFileSync(
+  "tracks.txt",
+  table(
+    [
+      ["Artist", "Album", "Name", "Scrobbles"],
+      ...ordered.map(({ artist, album, name, count }) => [
+        artist,
+        album,
+        name,
+        count,
+      ]),
+    ],
+    { columnDefault: { width: 26 } }
+  ),
+  "utf8"
 );
 
 const spot = new SpotifyWebApi({
@@ -231,13 +251,17 @@ await Promise.all(
   )
 );
 trackIdProgress.stop();
-const trackIds = [...new Set(trackIds_.filter((id) => id !== undefined))];
+const trackIds = [...new Set(trackIds_.filter((id) => id !== undefined))].slice(
+  0,
+  1000
+);
 
 console.log("making spotify playlist...", `${trackIds.length}`);
 const playlistId = await withRetry(() =>
   spot
     .createPlaylist("Scrobbled", {
-      description: "https://github.com/anthonyrota/lastfm-to-spotify",
+      description:
+        "1000 most listened to tracks ordered by scrobbles https://github.com/anthonyrota/lastfm-to-spotify",
       public: true,
     })
     .then((res) => res.body.id)
