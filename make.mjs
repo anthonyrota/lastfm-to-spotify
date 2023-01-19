@@ -8,7 +8,11 @@ const secrets = JSON.parse(fs.readFileSync("secrets.json", "utf8"));
 
 console.log("fetching scrobbles from last.fm");
 const tracksLFMProgress = new cliProgress.SingleBar(
-  {},
+  {
+    format: " {bar} {percentage}% | ETA: {eta}s | {value}/{total} Pages",
+    barCompleteChar: "\u2588",
+    barIncompleteChar: "\u2591",
+  },
   cliProgress.Presets.shades_classic
 );
 const tracksLFM = await (async () => {
@@ -40,8 +44,12 @@ const tracksLFM = await (async () => {
 })();
 
 let scrobbled = {};
+function getScrobblesForTrack(track) {
+  return (
+    scrobbled[`${track.artist}@@${track.album}@@${track.name}`]?.count ?? 0
+  );
+}
 
-console.log("counting last.fm scrobbles...");
 tracksLFM.forEach((track) => {
   const artist = track.artist["#text"];
   const album = track.album["#text"];
@@ -54,7 +62,6 @@ tracksLFM.forEach((track) => {
   }
 });
 const ordered = Object.values(scrobbled);
-ordered.sort((a, b) => b.count - a.count);
 let tracks = ordered.filter(
   ({ artist, album, name, count }) =>
     artist !== "Travi$ Scott" &&
@@ -70,25 +77,6 @@ let tracks = ordered.filter(
     album !== "Lost Cause" &&
     !(artist == "Bryson Tiller" && name === "Break Bread (feat. Vory)")
 );
-function bold(text) {
-  return `\\033[1m${text}\\033[21m`;
-}
-fs.writeFileSync(
-  "tracks.txt",
-  table(
-    [
-      ["Artist", "Album", "Name", "Scrobbles"],
-      ...ordered.map(({ artist, album, name, count }) => [
-        artist,
-        album,
-        name,
-        count,
-      ]),
-    ],
-    { columnDefault: { width: 26 } }
-  ),
-  "utf8"
-);
 
 const spot = new SpotifyWebApi({
   clientId: secrets.spotClientId,
@@ -103,40 +91,39 @@ const chunkArray = (array, chunkSize) =>
     .map((begin) => array.slice(begin, begin + chunkSize));
 
 function withRetry(makeProm) {
-  let maxTries = 1000;
   let tries = 0;
   function get() {
     tries++;
     return makeProm().catch((err) => {
-      if (tries == maxTries) {
-        console.log(err);
-        return;
-      }
       if (err && "headers" in err && err.headers["retry-after"]) {
         return new Promise((res) => {
-          setTimeout(() => res(), Number(err.headers["retry-after"] + 2));
+          setTimeout(
+            () => res(),
+            1000 * (Number(err.headers["retry-after"]) + 1)
+          );
         }).then(get);
       } else {
-        return makeProm();
+        throw err;
       }
     });
   }
   return get();
 }
 
-const trackIdLimit = pLimit(10);
-const trackIds_ = Array(tracks.length);
-console.log("finding spotify track ids...", `(${tracks.length})`);
+const trackIdLimit = pLimit(25);
+const trackIds_ = {};
+console.log("finding spotify track ids...");
 const trackIdProgress = new cliProgress.SingleBar(
   {
     format:
-      " {bar} {percentage}% | ETA: {eta}s | {value}/{total} | {artist} - {trackName}",
+      " {bar} {percentage}% | ETA: {eta}s | {value}/{total} Songs | {artist} - {trackName}",
     barCompleteChar: "\u2588",
     barIncompleteChar: "\u2591",
   },
   cliProgress.Presets.shades_classic
 );
-trackIdProgress.start(tracks.length, 0, { trackName: "" });
+trackIdProgress.start(tracks.length, 0, { artist: "", trackName: "" });
+let questionable = [];
 await Promise.all(
   tracks.map((track, idx) =>
     trackIdLimit(() => {
@@ -158,19 +145,30 @@ await Promise.all(
             .then((res) => {
               const items = res.body.tracks.items;
               if (items.length > 0) {
-                if (alts.length - trackAlts.length >= artists.length * 3 + 1) {
+                if (alts.length - trackAlts.length >= artists.length * 2 + 1) {
+                  let degree = "";
+                  if (
+                    alts.length - trackAlts.length >=
+                    artists.length * 3 + 1
+                  ) {
+                    degree = "HIGHLY ";
+                  }
+                  let msg = `${degree}QUESTIONABLE (${idx}/${tracks.length}) ${track.artist} ${track.album} ${track.name}`;
                   process.stdout.clearLine();
                   process.stdout.cursorTo(0);
-                  process.stdout.write(
-                    `QUESTIONABLE (${idx}/${tracks.length}) ${track.artist} ${track.album} ${track.name}`
-                  );
+                  process.stdout.write(msg);
                   console.log();
+                  questionable.push([degree, t]);
                 }
                 trackIdProgress.increment({
                   artist: track.artist,
                   trackName: track.name,
                 });
-                trackIds_[idx] = items[0].id;
+                if (items[0].id in trackIds_) {
+                  trackIds_[items[0].id].count += track.count;
+                } else {
+                  trackIds_[items[0].id] = { ...track };
+                }
               } else {
                 if (trackAlts.length > 1) {
                   return search(trackAlts.slice(1));
@@ -242,6 +240,7 @@ await Promise.all(
           album: album.replace(/\w*[^\w ]\w*/g, ""),
           name: name.replace(/\w*[^\w ]\w*/g, ""),
         })),
+        `${track.artist} ${track.album} ${track.name}`,
         { artist: track.artist, name },
         { artist: track.artist, name: name.replace(/\w*[^\w ]\w*/g, "") },
       ];
@@ -251,35 +250,67 @@ await Promise.all(
   )
 );
 trackIdProgress.stop();
-const trackIds = [...new Set(trackIds_.filter((id) => id !== undefined))].slice(
-  0,
-  1000
-);
+questionable.forEach(() => console.log());
 
-console.log("making spotify playlist...", `${trackIds.length}`);
+let trackIds = Object.entries(trackIds_);
+trackIds.sort((a, b) => b[1].count - a[1].count);
+trackIds = trackIds.slice(0, 1000);
+console.log("writing summary table...");
+fs.writeFileSync(
+  "tracks.txt",
+  table(
+    [
+      ["Artist", "Album", "Name", "Scrobbles"],
+      ...trackIds.map(([_, { artist, album, name, count }]) => [
+        artist,
+        album,
+        name,
+        count,
+      ]),
+    ],
+    { columnDefault: { width: 26 } }
+  ),
+  "utf8"
+);
+trackIds = trackIds.map((e) => e[0]);
+
+console.log("making spotify playlist...");
 const playlistId = await withRetry(() =>
   spot
     .createPlaylist("Scrobbled", {
       description:
-        "1000 most listened to tracks ordered by scrobbles https://github.com/anthonyrota/lastfm-to-spotify",
+        "1000 most listened to tracks https://github.com/anthonyrota/lastfm-to-spotify",
       public: true,
     })
     .then((res) => res.body.id)
 );
 console.log("adding songs to spotify playlist...");
-const chunkSize = 100;
 const seq = pLimit(1);
+const playlistProgress = new cliProgress.SingleBar(
+  {
+    format:
+      " {bar} {percentage}% | ETA: {eta}s | {value}/{total} Songs | {artist} - {name} [{count}]",
+    barCompleteChar: "\u2588",
+    barIncompleteChar: "\u2591",
+  },
+  cliProgress.Presets.shades_classic
+);
+playlistProgress.start(trackIds_.length, 0, {
+  artist: "",
+  album: "",
+  name: "",
+  count: "",
+});
 await Promise.all(
-  chunkArray(trackIds, chunkSize).map((trackIds, idx) =>
+  trackIds.map((trackId) =>
     seq(() =>
       withRetry(() =>
-        spot.addTracksToPlaylist(
-          playlistId,
-          trackIds.map((id) => `spotify:track:${id}`)
-        )
+        spot.addTracksToPlaylist(playlistId, [`spotify:track:${trackId}`])
       )
     ).then(() => {
-      console.log(`${Math.min(chunkSize * (idx + 1), trackIds.length)} added`);
+      playlistProgress.increment(trackIds_[trackId]);
     })
   )
 );
+playlistProgress.stop();
+console.log("done!");
